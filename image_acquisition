@@ -1,0 +1,156 @@
+#import sys
+#sys.path.append("C:\\Users\\Admin\\Desktop\\SWIR\\arena_api-2.7.1-py3-none-any.whl")
+from arena_api.system import system
+
+import numpy as np
+import time
+import csv
+import os
+import cv2
+from datetime import datetime
+import scipy.io  # For saving .mat files
+
+# === Configuration ===
+save_interval_seconds = 5
+duration_seconds = 60
+exposure_time_us = 2000 # 20 ms
+csv_filename = r"C:\\Users\\Admin\\Desktop\\SWIR\\intensity_log.csv"
+image_folder = r"C:\\Users\\Admin\\Desktop\\SWIR\\saved_frames"
+camera_resolution = (512, 640)  # (height, width)
+roi_coords = (200, 300, 250, 400)  # (y1, y2, x1, x2)
+
+if not os.path.exists(image_folder):
+    os.makedirs(image_folder)
+
+with open(csv_filename, mode='w', newline='') as csvfile:
+    writer = csv.writer(csvfile)
+    writer.writerow(["Timestamp", "Avg_Intensity",  "Min_Pixel", "Max_Pixel"])
+
+# === Connect to Camera ===
+devices = system.create_device()
+if not devices:
+    raise Exception("No camera found!")
+device = devices[0]
+nodemap = device.nodemap
+
+# === Stop Stream if Already Running ===
+try:
+    device.stop_stream()
+    time.sleep(0.1)
+except:
+    pass
+
+# === Camera Configuration ===
+acq_mode_node = nodemap.get_node("AcquisitionMode")
+if acq_mode_node and acq_mode_node.is_writable:
+    acq_mode_node.value = "Continuous"
+
+pix_fmt_node = nodemap.get_node("PixelFormat")
+if pix_fmt_node and pix_fmt_node.is_writable:
+    try:
+        pix_fmt_node.value = "Mono12"
+        print("✅ PixelFormat set to Mono12")
+    except Exception as e:
+        print(f"⚠️ Error setting PixelFormat: {e}")
+
+exp_node = nodemap.get_node("ExposureTime")
+if exp_node and exp_node.is_writable:
+    try:
+        exp_node.value = exposure_time_us
+        print(f"✅ Exposure time set to {exposure_time_us} µs")
+    except Exception as e:
+        print(f"⚠️ Error setting exposure time: {e}")
+
+# === Start Streaming ===
+device.start_stream()
+print("\n📡 Monitoring started. Will auto-stop after 30 seconds...\n")
+
+start_time = time.time()
+last_saved_time = start_time
+
+try:
+    while True:
+        current_time = time.time()
+        elapsed_time = current_time - start_time
+
+        if elapsed_time >= duration_seconds:
+            print("🕒 30 seconds reached. Stopping...")
+            break
+
+        # === Get image buffer and convert ===
+        image_buffer = device.get_buffer()
+
+        # Convert raw buffer to bytes, then to 16-bit array
+        image_data = np.frombuffer(bytes(image_buffer.data), dtype=np.uint16)
+
+        # Reshape to 2D image with resolution (height, width)
+        reshaped_image = image_data.reshape(camera_resolution)
+
+
+
+        # === Apply ROI ===
+        y1, y2, x1, x2 = roi_coords
+        roi = reshaped_image[y1:y2, x1:x2]
+
+        # === Intensity Calculations ===
+        avg_intensity = np.mean(roi)
+
+        min_pixel = np.min(roi)
+        max_pixel = np.max(roi)
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] 🔲 ROI Avg: {avg_intensity:.2f} |  Min: {min_pixel} | Max: {max_pixel}")
+
+        # === Log to CSV ===
+        with open(csv_filename, mode='a', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow([timestamp, avg_intensity, min_pixel, max_pixel])
+
+        # === Save Frame if Interval Reached ===
+        if current_time - last_saved_time >= save_interval_seconds:
+            base_name = timestamp.replace(":", "-").replace(" ", "_")
+
+            mat_path = os.path.join(image_folder, f"{base_name}_data.mat")
+            roi_npy_path = os.path.join(image_folder, f"{base_name}_roi.npy")
+            png_path = os.path.join(image_folder, f"{base_name}_mono16.png")
+            double_npy_path = os.path.join(image_folder, f"{base_name}_double.npy")
+
+            # Normalize to 16-bit PNG for visualization
+            norm_img = cv2.normalize(reshaped_image, None, 0, 65535, cv2.NORM_MINMAX)
+            norm_img = norm_img.astype(np.uint16)
+            cv2.imwrite(png_path, norm_img)
+
+            # Save float64 version
+            reshaped_image_double = reshaped_image.astype(np.float64)
+            np.save(double_npy_path, reshaped_image_double)
+
+            # Save .mat file
+            scipy.io.savemat(mat_path, {
+                'grayscale_image_uint16': reshaped_image,
+                'grayscale_image_double': reshaped_image_double,
+                'roi': roi,
+                'timestamp': timestamp,
+                'avg_intensity': avg_intensity,
+                'max_pixel': max_pixel,
+                'min_pixel': min_pixel,
+
+            })
+
+            np.save(roi_npy_path, roi)
+
+            print(f"💾 Saved 16-bit PNG: {png_path}")
+            print(f"💾 Saved image as Double (.npy): {double_npy_path}")
+            print(f"💾 Saved data in .mat format: {mat_path}")
+            last_saved_time = current_time
+
+        device.requeue_buffer(image_buffer)
+        time.sleep(1)
+
+except KeyboardInterrupt:
+    print("\n🛑 Stopped by user.")
+
+finally:
+    device.stop_stream()
+    system.destroy_device()
+
+
