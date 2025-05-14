@@ -1,0 +1,81 @@
+function analyzeAbsorbanceAtThreeWavelengths()
+    % Define the wavelengths and related files
+    wavelengths = {'940', '1450', '1550'};
+    baseFilenames = {'wat13', '50mg132', '70mg132', '100mg132','150mg132', '200mg132', '250mg132', '300mg132', '350mg132', '400mg132', '450mg132', '500mg132', '1000mg132', '1500mg132', '2000mg132', '2500mg132',  '3000mg132'};  % corresponding to 0, 500, 550 mg/dL
+    glucoseLevels = [0, 50,75,100, 150,200,250,300, 350,400,450,500, 1000,1500, 2000,2500,3000];
+
+    % Define ROI
+    row_start = 100; row_end = 400;
+    col_start = 200; col_end = 500;
+
+    for i = 1:length(wavelengths)
+        wl = wavelengths{i};
+        matFiles = strcat(wl, 'nm', baseFilenames, '.mat');
+        fprintf('\nProcessing wavelength: %snm\n', wl);
+        disp('Files being analyzed:');
+        disp(matFiles);
+
+
+        % Get intensities
+        mean_intensities = analyzeGroup(matFiles, row_start, row_end, col_start, col_end);
+
+        % Calculate absorbance
+        I0 = mean_intensities(1);  % Assuming first value is for water (I0)
+        absorbance = -log10( mean_intensities ./ I0)
+        % Fit a line (Beer–Lambert: A = ε * c * l)
+        coeffs = polyfit(glucoseLevels, absorbance, 1);  % [slope, intercept]
+        fittedA = polyval(coeffs, glucoseLevels);
+
+        % Plot Absorbance vs. Concentration
+        figure;
+        plot(glucoseLevels, absorbance, 'o', 'MarkerSize', 8, 'DisplayName', 'Measured A');
+        hold on;
+        plot(glucoseLevels, fittedA, '-r', 'LineWidth', 2, ...
+             'DisplayName', sprintf('Fit: A = %.4f·C + %.4f', coeffs));
+        xlabel('Glucose Concentration (mg/dL)');
+        ylabel('Absorbance (A)');
+        title(['Beer–Lambert Fit at ', wl, ' nm']);
+        legend;
+        grid on;
+
+        fprintf('Wavelength %s nm: Slope (ε·l) = %.4f\n', wl, coeffs(1));
+        % Plot glucose vs intensity
+        figure;
+        plot(glucoseLevels, mean_intensities, '-o', 'LineWidth', 2);
+        xlabel('Glucose Concentration (mg/dL)');
+        ylabel('Mean ROI Intensity');
+        title(['Glucose vs. Mean ROI Intensity at ', wl, ' nm']);
+        grid on;
+    end
+end
+
+function mean_intensities = analyzeGroup(matFiles, row_start, row_end, col_start, col_end)
+    mean_intensities = zeros(1, numel(matFiles));
+
+    % Load dark image once (assumes 'dark.mat' in the same folder)
+    darkData = load('dark1.mat');
+    darkVar = fieldnames(darkData);
+    darkImage = darkData.(darkVar{1});
+
+    for i = 1:numel(matFiles)
+        data = load(matFiles{i});
+        varName = fieldnames(data);
+        imageData = data.(varName{1});
+
+        % Subtract dark image
+        correctedImage = double(imageData) - double(darkImage);
+        correctedImage(correctedImage < 0) = 0;  % Clip negatives to zero
+
+        % Extract ROI
+        roi = correctedImage(row_start:row_end, col_start:col_end);
+        mean_intensities(i) = mean(roi(:));
+
+        % Optional visualization
+        figure;
+        imagesc(correctedImage); colormap('gray'); colorbar;
+        title(sprintf('Corrected Image: %s | Mean ROI Intensity = %.4f', matFiles{i}, mean_intensities(i)));
+        hold on;
+        rectangle('Position', [col_start, row_start, col_end - col_start, row_end - row_start], ...
+                  'EdgeColor', 'r', 'LineWidth', 2);
+    end
+end
